@@ -8,17 +8,18 @@ const progBar = $("#progress .bar");
 const progLbl = $("#progress .label");
 
 async function api(path, opts){
-  const r = await fetch(path, {
+  const r = await fetch(path + (path.includes("?") ? "&" : "?") + "_ts=" + Date.now(), {
     method: opts?.method || "GET",
-    headers: { "Content-Type":"application/json" },
-    body: opts?.body ? JSON.stringify(opts.body) : undefined
+    headers: { "Content-Type":"application/json", "Cache-Control":"no-store" },
+    body: opts?.body ? JSON.stringify(opts.body) : undefined,
+    cache: "no-store",
   });
   return r.json();
 }
 
 function render(items){
   tbody.innerHTML = "";
-  for (const it of items){
+  for (const it of (items || [])){
     const cls = (it.state||"").includes("RECORDING") ? "g" : (it.state==="STAND BY" ? "y" : "r");
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -62,29 +63,39 @@ async function runDiscoverWithProgress(){
   progLbl.textContent = "0%";
 
   const id = start.id;
-  let done = false;
-  while (!done){
+  let stopped = false;
+
+  while (!stopped){
     const st = await api(`/api/discover/status?id=${encodeURIComponent(id)}`);
-    if (st.ok){
+    if (st && st.ok){
       const pct = st.progress ?? 0;
       const ph  = st.processedHosts ?? 0;
       const th  = st.totalHosts ?? 0;
       progBar.style.width = pct + "%";
       progLbl.textContent = `${pct}% · ${ph}/${th} hosts`;
 
-      if (st.state === "done" || st.state === "error") {
-        done = true;
-        if (st.state === "error") progLbl.textContent = "error";
+      if (st.done || st.state === "done" || st.state === "error") {
+        stopped = true;
+        
+        if (st.state === "done" && !st.error) {
+          progBar.style.width = "100%";
+        } else {
+          progLbl.textContent = "error";
+        }
       }
+    } else {
+      
+      stopped = true;
     }
-    await new Promise(r=>setTimeout(r, 600));
+    
+    await new Promise(r=>setTimeout(r, 700));
   }
 
   setTimeout(()=>{
     progWrap.style.display = "none";
     progBar.style.width = "0%";
     progLbl.textContent = "";
-  }, 400);
+  }, 450);
 
   
   await refresh();
