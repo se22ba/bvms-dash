@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>BVMS Recording Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>BVMS · RCP+ Recording Status</h1>
+    <div class="controls">
+      <input id="nameInput" placeholder="Nombre (opcional)" />
+      <input id="ipInput" placeholder="IP de cámara (ej. 172.20.65.85)" />
+      <button id="addBtn">Agregar</button>
+      <button id="discoverBtn">Descubrir (VRM)</button>
+      <button id="pollBtn">Poll NOW</button>
+      <span id="tick"></span>
+    </div>
+  </header>
+
+  <main>
+    <table id="tbl">
+      <thead>
+        <tr>
+          <th>Nombre</th>
+          <th>IP</th>
+          <th>Estado</th>
+          <th>Cód</th>
+          <th>recPreset</th>
+          <th>encPreset</th>
+          <th>flags</th>
+          <th>HTTP</th>
+          <th>Error</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </main>
+
+  <footer>
+    <small>RCP+ 0x0AAE directo a cámaras. El VRM sólo se usa para descubrir IPs/nombres.</small>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
