@@ -1,4 +1,3 @@
-
 import fetch from "node-fetch";
 
 export function mapRecState(code){
@@ -12,7 +11,6 @@ export function mapRecState(code){
   ];
   return states[code] ?? `UNKNOWN(${code})`;
 }
-
 function extract(tag, xml){
   const m = String(xml).match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "i"));
   return m ? m[1].trim() : null;
@@ -20,14 +18,8 @@ function extract(tag, xml){
 function decodeHexStr(str){
   return str.trim().split(/\s+/).filter(Boolean).map(h => parseInt(h,16) & 0xff);
 }
-
-/**
- * @param {string} ip
- * @param {{user:string, pass:string, channel?:number, secure?:boolean, timeout?:number}} opt
- */
 export async function queryCamera0AAE(ip, opt={}){
-  const { user, pass, channel=1, secure=false, timeout=5000 } = opt;
-
+  const { user, pass, channel=1, secure=false, timeout=2500 } = opt;
   if (secure) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   const proto = secure ? "https" : "http";
   const url = `${proto}://${ip}/rcp.xml?command=0x0aae&type=P_OCTET&direction=READ&num=${channel}`;
@@ -42,7 +34,6 @@ export async function queryCamera0AAE(ip, opt={}){
     const err  = extract("err", body);
     const str  = extract("str", body);
     const status = r.status;
-
     if (!str){
       return { ip, state:null, stateCode:null, recPreset:null, encPreset:null, flags:null, http:status, err: err || "no <str>", url };
     }

@@ -1,4 +1,3 @@
-
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -18,15 +17,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 
-const PORT        = parseInt(process.env.PORT || "8080", 10);
-const CAM_USER    = process.env.CAM_USER || "";
-const CAM_PASS    = process.env.CAM_PASS || "";
-const CAM_CHANNEL = parseInt(process.env.CAM_CHANNEL || "1", 10);
-const CAM_SECURE  = String(process.env.CAM_SECURE||"false").toLowerCase()==="true";
-const VRM_HOSTS   = (process.env.VRM_HOSTS || "").split(",").map(s=>s.trim()).filter(Boolean);
-const VRM_USER    = process.env.VRM_USER || "";
-const VRM_PASS    = process.env.VRM_PASS || "";
-const VRM_SECURE  = String(process.env.VRM_USE_HTTPS||"true").toLowerCase()==="true";
+const PORT            = parseInt(process.env.PORT || "3000", 10);
+const CAM_USER        = process.env.CAM_USER || "";
+const CAM_PASS        = process.env.CAM_PASS || "";
+const CAM_CHANNEL     = parseInt(process.env.CAM_CHANNEL || "1", 10);
+const CAM_SECURE      = String(process.env.CAM_SECURE || "false").toLowerCase()==="true";
+
+const CAM_TIMEOUT_MS  = parseInt(process.env.CAM_TIMEOUT_MS || "2500", 10);
+const POLL_CONCURRENCY= parseInt(process.env.POLL_CONCURRENCY || "6", 10);
+const POLL_PERIOD_MS  = parseInt(process.env.POLL_PERIOD_MS || "5000", 10);
+
+const VRM_HOSTS       = (process.env.VRM_HOSTS || "").split(",").map(s=>s.trim()).filter(Boolean);
+const VRM_USER        = process.env.VRM_USER || "";
+const VRM_PASS        = process.env.VRM_PASS || "";
+const VRM_SECURE      = String(process.env.VRM_USE_HTTPS || "true").toLowerCase()==="true";
 
 const DATA_DIR = path.join(__dirname, "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -35,16 +39,26 @@ const CAM_TXT  = path.join(DATA_DIR, "cameras.txt");
 const CAM_JSON = path.join(DATA_DIR, "cameras.json");
 
 
+const START = Date.now();
+app.get("/health", (req,res)=> {
+  res.json({ ok:true, up_ms: Date.now()-START, cameras: (globalThis.cameras?.length ?? 0) });
+});
+
+
+app.use((req,res,next)=>{
+  const t0 = Date.now();
+  res.on("finish", ()=> console.log(`${req.method} ${req.originalUrl} -> ${res.statusCode} (${Date.now()-t0}ms)`));
+  next();
+});
+
+
 function parseLine(line){
-  
-  const t = line.trim();
+  const t = (line || "").trim();
   if (!t) return null;
-  
   const m = t.match(/^\s*"([^"]+)"\s*,\s*([^,]+)\s*$/);
   if (m) return { name: m[1].trim(), ip: m[2].trim() };
   const parts = t.split(",").map(s=>s.trim());
   if (parts.length >= 2) return { name: parts[0], ip: parts[1] };
-  
   return { name: null, ip: parts[0] || t };
 }
 function readCamerasTxt(){
@@ -75,25 +89,35 @@ function loadCameras(){
 }
 
 
-let cameras = loadCameras();         
+let cameras = loadCameras();          
 let lastStatus = [];                  
 let polling = false;
 let intervalHandle = null;
 
 
 async function pollOnce(){
+  const queue = cameras.slice();      // shallow copy
   const results = [];
-  for (const cam of cameras){
-    const res = await queryCamera0AAE(cam.ip, {
-      user: CAM_USER, pass: CAM_PASS, channel: CAM_CHANNEL, secure: CAM_SECURE, timeout: 5000
-    });
-    results.push({ name: cam.name || null, ...res });
-    await new Promise(r=>setTimeout(r, 120));
+  const workers = Math.max(1, Math.min(POLL_CONCURRENCY, queue.length));
+
+  async function worker(){
+    while (queue.length){
+      const cam = queue.shift();
+      try {
+        const res = await queryCamera0AAE(cam.ip, {
+          user: CAM_USER, pass: CAM_PASS, channel: CAM_CHANNEL, secure: CAM_SECURE, timeout: CAM_TIMEOUT_MS
+        });
+        results.push({ name: cam.name || null, ...res });
+      } catch (e){
+        results.push({ name: cam.name || null, ip: cam.ip, state:null, stateCode:null, http:null, err: e.message });
+      }
+    }
   }
+  await Promise.all(Array.from({length: workers}, worker));
   lastStatus = results;
   return results;
 }
-function startPolling(periodMs=5000){
+function startPolling(periodMs=POLL_PERIOD_MS){
   if (intervalHandle) clearInterval(intervalHandle);
   intervalHandle = setInterval(()=>pollOnce().catch(()=>{}), periodMs);
   polling = true;
@@ -132,9 +156,8 @@ app.post("/api/discover", async (req,res)=>{
   let found = [];
   for (const h of hosts){
     const f = await discoverFromVRM(h, { user: VRM_USER, pass: VRM_PASS, secure: VRM_SECURE });
-    found = found.concat(f); 
+    found = found.concat(f); // [{ip,name?}]
   }
-  
   const map = new Map(cameras.map(c=>[c.ip, c]));
   for (const it of found){
     const prev = map.get(it.ip) || { ip: it.ip, name: null };
@@ -146,13 +169,14 @@ app.post("/api/discover", async (req,res)=>{
   res.json({ ok:true, found: found.length, cameras });
 });
 
+
 app.get("/api/status", async (req,res)=>{
-  if (!polling) await pollOnce();
-  res.json({ ts: Date.now(), items: lastStatus });
+  if (!polling) { pollOnce().catch(()=>{}); }
+  res.json({ ts: Date.now(), items: lastStatus || [] });
 });
 
 app.post("/api/poll/start", (req,res)=>{
-  const { periodMs = 5000 } = req.body || {};
+  const { periodMs = POLL_PERIOD_MS } = req.body || {};
   startPolling(periodMs);
   res.json({ ok:true, periodMs });
 });
@@ -165,7 +189,8 @@ app.post("/api/poll/once", async (req,res)=>{
 
 app.use("/", express.static(path.join(__dirname, "public")));
 
+
 app.listen(PORT, ()=>{
-  console.log(` Dashboard en http://localhost:${PORT}`);
-  console.log(`Cámaras: ${cameras.length}`);
+  console.log(`🚀 Dashboard en http://localhost:${PORT}`);
+  console.log(`Cámaras: ${cameras.length} | timeout=${CAM_TIMEOUT_MS}ms | conc=${POLL_CONCURRENCY} | period=${POLL_PERIOD_MS}ms`);
 });
