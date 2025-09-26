@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+
 import { queryCamera0AAE } from "./rcp.js";
 import { discoverFromVRM } from "./discovery.js";
 
@@ -17,30 +18,35 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 
-const PORT            = parseInt(process.env.PORT || "3000", 10);
-const CAM_USER        = process.env.CAM_USER || "";
-const CAM_PASS        = process.env.CAM_PASS || "";
-const CAM_CHANNEL     = parseInt(process.env.CAM_CHANNEL || "1", 10);
-const CAM_SECURE      = String(process.env.CAM_SECURE || "false").toLowerCase()==="true";
+const PORT             = parseInt(process.env.PORT || "3000", 10);
 
-const CAM_TIMEOUT_MS  = parseInt(process.env.CAM_TIMEOUT_MS || "2500", 10);
-const POLL_CONCURRENCY= parseInt(process.env.POLL_CONCURRENCY || "6", 10);
-const POLL_PERIOD_MS  = parseInt(process.env.POLL_PERIOD_MS || "5000", 10);
 
-const VRM_HOSTS       = (process.env.VRM_HOSTS || "").split(",").map(s=>s.trim()).filter(Boolean);
-const VRM_USER        = process.env.VRM_USER || "";
-const VRM_PASS        = process.env.VRM_PASS || "";
-const VRM_SECURE      = String(process.env.VRM_USE_HTTPS || "true").toLowerCase()==="true";
+const CAM_USER         = process.env.CAM_USER || "";
+const CAM_PASS         = process.env.CAM_PASS || "";
+const CAM_CHANNEL      = parseInt(process.env.CAM_CHANNEL || "1", 10);
+const CAM_SECURE       = String(process.env.CAM_SECURE || "false").toLowerCase()==="true";
+const CAM_TIMEOUT_MS   = parseInt(process.env.CAM_TIMEOUT_MS || "2500", 10);
 
-const DATA_DIR = path.join(__dirname, "data");
+
+const POLL_CONCURRENCY = parseInt(process.env.POLL_CONCURRENCY || "6", 10);
+const POLL_PERIOD_MS   = parseInt(process.env.POLL_PERIOD_MS || "5000", 10);
+
+
+const VRM_HOSTS        = (process.env.VRM_HOSTS || "").split(",").map(s=>s.trim()).filter(Boolean);
+const VRM_USER         = process.env.VRM_USER || "";
+const VRM_PASS         = process.env.VRM_PASS || "";
+const VRM_SECURE       = String(process.env.VRM_USE_HTTPS || "true").toLowerCase()==="true";
+
+
+const DATA_DIR  = path.join(__dirname, "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const CAM_TXT  = path.join(DATA_DIR, "cameras.txt");
-const CAM_JSON = path.join(DATA_DIR, "cameras.json");
+const CAM_TXT   = path.join(DATA_DIR, "cameras.txt");
+const CAM_JSON  = path.join(DATA_DIR, "cameras.json");
 
 
 const START = Date.now();
-app.get("/health", (req,res)=> {
+app.get("/health", (_req,res)=> {
   res.json({ ok:true, up_ms: Date.now()-START, cameras: (globalThis.cameras?.length ?? 0) });
 });
 
@@ -83,20 +89,19 @@ function saveCamerasTxt(items){
   const txt = items.map(o => o.name ? `${o.name},${o.ip}` : o.ip).join("\n");
   fs.writeFileSync(CAM_TXT, txt, "utf8");
 }
-
 function loadCameras(){
   return readCamerasJson() || readCamerasTxt();
 }
 
 
-let cameras = loadCameras();          
-let lastStatus = [];                  
-let polling = false;
+let cameras    = loadCameras();    // [{ip,name?}]
+let lastStatus = [];               // salida de 0x0AAE
+let polling    = false;
 let intervalHandle = null;
 
 
 async function pollOnce(){
-  const queue = cameras.slice();      // shallow copy
+  const queue = cameras.slice();
   const results = [];
   const workers = Math.max(1, Math.min(POLL_CONCURRENCY, queue.length));
 
@@ -105,7 +110,11 @@ async function pollOnce(){
       const cam = queue.shift();
       try {
         const res = await queryCamera0AAE(cam.ip, {
-          user: CAM_USER, pass: CAM_PASS, channel: CAM_CHANNEL, secure: CAM_SECURE, timeout: CAM_TIMEOUT_MS
+          user: CAM_USER,
+          pass: CAM_PASS,
+          channel: CAM_CHANNEL,
+          secure: CAM_SECURE,
+          timeout: CAM_TIMEOUT_MS
         });
         results.push({ name: cam.name || null, ...res });
       } catch (e){
@@ -124,7 +133,7 @@ function startPolling(periodMs=POLL_PERIOD_MS){
 }
 
 
-app.get("/api/cameras", (req,res)=> res.json({ cameras }));
+app.get("/api/cameras", (_req,res)=> res.json({ cameras }));
 
 app.post("/api/cameras", (req,res)=>{
   const { ips=[], items=[] } = req.body || {};
@@ -144,19 +153,101 @@ app.post("/api/cameras", (req,res)=>{
   res.json({ ok:true, count:cameras.length });
 });
 
-app.post("/api/forget", (req,res)=>{
+app.post("/api/forget", (_req,res)=>{
   cameras = [];
   saveCamerasJson(cameras);
   saveCamerasTxt(cameras);
   res.json({ ok:true });
 });
 
+
+const discoverJobs = new Map(); // id -> { id, state, progress, steps, total, totalHosts, processedHosts, found, error }
+
+function newJob(){
+  const id = Math.random().toString(36).slice(2);
+  const job = {
+    id,
+    state: "running",
+    progress: 0,
+    steps: 0,
+    total: 1,
+    totalHosts: 0,
+    processedHosts: 0,
+    found: [],
+    error: null
+  };
+  discoverJobs.set(id, job);
+  return job;
+}
+function update(job, stepDelta, extras={}){
+  job.steps += stepDelta;
+  job.progress = Math.min(100, Math.round(job.steps / job.total * 100));
+  Object.assign(job, extras);
+}
+
+app.post("/api/discover/start", async (req,res)=>{
+  const { hosts = VRM_HOSTS } = req.body || {};
+  const job = newJob();
+
+  
+  job.total = Math.max(1, hosts.length * 3);
+  job.totalHosts = hosts.length;
+  job.processedHosts = 0;
+
+  (async ()=>{
+    try{
+      let found = [];
+      for (const h of hosts){
+        
+        const f1 = await discoverFromVRM(h, { user: VRM_USER, pass: VRM_PASS, secure: VRM_SECURE });
+        found = found.concat(f1);
+        update(job, 1);
+
+        
+        update(job, 1);
+
+        
+        const byIp = new Map(found.map(o=>[o.ip, o]));
+        found = Array.from(byIp.values());
+
+        
+        job.processedHosts += 1;
+        update(job, 1, { found, processedHosts: job.processedHosts });
+      }
+
+      
+      const map = new Map(cameras.map(c=>[c.ip, c]));
+      for (const it of found){
+        const prev = map.get(it.ip) || { ip: it.ip, name: null };
+        map.set(it.ip, { ip: it.ip, name: it.name ?? prev.name ?? null });
+      }
+      cameras = Array.from(map.values());
+      saveCamerasJson(cameras);
+      saveCamerasTxt(cameras);
+
+      update(job, 0, { state:"done", progress:100, found });
+    }catch(e){
+      update(job, 0, { state:"error", error:String(e) });
+    }
+  })();
+
+  res.json({ ok:true, id: job.id });
+});
+
+app.get("/api/discover/status", (req,res)=>{
+  const id = String(req.query.id||"");
+  const job = discoverJobs.get(id);
+  if (!job) return res.status(404).json({ ok:false, error:"job not found" });
+  res.json({ ok:true, ...job, camerasCount: cameras.length });
+});
+
+
 app.post("/api/discover", async (req,res)=>{
   const { hosts = VRM_HOSTS } = req.body || {};
   let found = [];
   for (const h of hosts){
     const f = await discoverFromVRM(h, { user: VRM_USER, pass: VRM_PASS, secure: VRM_SECURE });
-    found = found.concat(f); // [{ip,name?}]
+    found = found.concat(f);
   }
   const map = new Map(cameras.map(c=>[c.ip, c]));
   for (const it of found){
@@ -170,27 +261,22 @@ app.post("/api/discover", async (req,res)=>{
 });
 
 
-app.get("/api/status", async (req,res)=>{
+app.get("/api/status", async (_req,res)=>{
   if (!polling) { pollOnce().catch(()=>{}); }
   res.json({ ts: Date.now(), items: lastStatus || [] });
 });
-
 app.post("/api/poll/start", (req,res)=>{
   const { periodMs = POLL_PERIOD_MS } = req.body || {};
   startPolling(periodMs);
   res.json({ ok:true, periodMs });
 });
-
-app.post("/api/poll/once", async (req,res)=>{
-  const out = await pollOnce();
-  res.json({ ok:true, ts: Date.now(), items: out });
+app.post("/api/poll/once", async (_req,res)=>{
+  const items = await pollOnce();
+  res.json({ ok:true, items });
 });
 
 
-app.use("/", express.static(path.join(__dirname, "public")));
+app.use("/", express.static(__dirname));
 
 
-app.listen(PORT, ()=>{
-  console.log(`🚀 Dashboard en http://localhost:${PORT}`);
-  console.log(`Cámaras: ${cameras.length} | timeout=${CAM_TIMEOUT_MS}ms | conc=${POLL_CONCURRENCY} | period=${POLL_PERIOD_MS}ms`);
-});
+app.listen(PORT, ()=> console.log(`server up on http://localhost:${PORT}`));

@@ -1,9 +1,18 @@
+
 const $ = s => document.querySelector(s);
-const tbody = $("#tbl tbody");
-const tick = $("#tick");
+
+const tbody   = $("#tbl tbody");
+const tick    = $("#tick");
+const progWrap= $("#progress");
+const progBar = $("#progress .bar");
+const progLbl = $("#progress .label");
 
 async function api(path, opts){
-  const r = await fetch(path, { method: opts?.method || "GET", headers: { "Content-Type":"application/json" }, body: opts?.body ? JSON.stringify(opts.body) : undefined });
+  const r = await fetch(path, {
+    method: opts?.method || "GET",
+    headers: { "Content-Type":"application/json" },
+    body: opts?.body ? JSON.stringify(opts.body) : undefined
+  });
   return r.json();
 }
 
@@ -42,15 +51,52 @@ $("#addBtn").onclick = async () => {
   await refresh();
 };
 
-$("#discoverBtn").onclick = async () => {
-  await api("/api/discover", { method:"POST" });
+async function runDiscoverWithProgress(){
+  
+  const start = await api("/api/discover/start", { method:"POST" });
+  if (!start.ok) return;
+
+  
+  progWrap.style.display = "flex";
+  progBar.style.width = "0%";
+  progLbl.textContent = "0%";
+
+  const id = start.id;
+  let done = false;
+  while (!done){
+    const st = await api(`/api/discover/status?id=${encodeURIComponent(id)}`);
+    if (st.ok){
+      const pct = st.progress ?? 0;
+      const ph  = st.processedHosts ?? 0;
+      const th  = st.totalHosts ?? 0;
+      progBar.style.width = pct + "%";
+      progLbl.textContent = `${pct}% · ${ph}/${th} hosts`;
+
+      if (st.state === "done" || st.state === "error") {
+        done = true;
+        if (st.state === "error") progLbl.textContent = "error";
+      }
+    }
+    await new Promise(r=>setTimeout(r, 600));
+  }
+
+  setTimeout(()=>{
+    progWrap.style.display = "none";
+    progBar.style.width = "0%";
+    progLbl.textContent = "";
+  }, 400);
+
+  
   await refresh();
-};
+}
+
+$("#discoverBtn").onclick = runDiscoverWithProgress;
 
 $("#pollBtn").onclick = async () => {
   await api("/api/poll/once", { method:"POST" });
   await refresh();
 };
+
 
 (async () => {
   await api("/api/poll/start", { method:"POST", body:{ periodMs: 5000 }});
