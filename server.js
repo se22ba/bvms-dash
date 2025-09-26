@@ -17,47 +17,69 @@ app.use(express.json());
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-
+// ====== ENV ======
 const PORT             = parseInt(process.env.PORT || "3000", 10);
 
-
+// Defaults para 0x0AAE (cámara)
 const CAM_USER         = process.env.CAM_USER || "";
 const CAM_PASS         = process.env.CAM_PASS || "";
 const CAM_CHANNEL      = parseInt(process.env.CAM_CHANNEL || "1", 10);
 const CAM_SECURE       = String(process.env.CAM_SECURE || "false").toLowerCase()==="true";
 const CAM_TIMEOUT_MS   = parseInt(process.env.CAM_TIMEOUT_MS || "2500", 10);
 
-
+// Polling
 const POLL_CONCURRENCY = parseInt(process.env.POLL_CONCURRENCY || "6", 10);
 const POLL_PERIOD_MS   = parseInt(process.env.POLL_PERIOD_MS || "5000", 10);
 
-
+// VRM discovery
 const VRM_HOSTS        = (process.env.VRM_HOSTS || "").split(",").map(s=>s.trim()).filter(Boolean);
 const VRM_USER         = process.env.VRM_USER || "";
 const VRM_PASS         = process.env.VRM_PASS || "";
 const VRM_SECURE       = String(process.env.VRM_USE_HTTPS || "true").toLowerCase()==="true";
 
-
+// ====== DATA PATHS ======
 const DATA_DIR  = path.join(__dirname, "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const CAM_TXT   = path.join(DATA_DIR, "cameras.txt");
 const CAM_JSON  = path.join(DATA_DIR, "cameras.json");
 
-
+// ====== HEALTH ======
 const START = Date.now();
 app.get("/health", (_req,res)=> {
   res.json({ ok:true, up_ms: Date.now()-START, cameras: (globalThis.cameras?.length ?? 0) });
 });
 
+// ====== CSP middleware ======
+app.use((req, res, next) => {
+  res.setHeader(
+    "Content-Security-Policy",
+    [
+      "default-src 'self'",
+      "img-src 'self' data: blob:",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "connect-src 'self' http: https: ws: wss:",
+      "frame-src 'self'",
+      "media-src blob:"
+    ].join("; ")
+  );
+  next();
+});
 
+// ====== Silenciar 404 de DevTools auto-config ======
+app.get("/.well-known/appspecific/com.chrome.devtools.json", (req, res) => {
+  res.type("application/json").send("{}");
+});
+
+// ====== Logger ======
 app.use((req,res,next)=>{
   const t0 = Date.now();
   res.on("finish", ()=> console.log(`${req.method} ${req.originalUrl} -> ${res.statusCode} (${Date.now()-t0}ms)`));
   next();
 });
 
-
+// ====== Helpers persistencia ======
 function parseLine(line){
   const t = (line || "").trim();
   if (!t) return null;
@@ -93,13 +115,13 @@ function loadCameras(){
   return readCamerasJson() || readCamerasTxt();
 }
 
-
+// ====== Estado ======
 let cameras    = loadCameras();    // [{ip,name?}]
 let lastStatus = [];               // salida de 0x0AAE
 let polling    = false;
 let intervalHandle = null;
 
-
+// ====== Poll 0x0AAE ======
 async function pollOnce(){
   const queue = cameras.slice();
   const results = [];
@@ -132,7 +154,7 @@ function startPolling(periodMs=POLL_PERIOD_MS){
   polling = true;
 }
 
-
+// ====== API Cámaras ======
 app.get("/api/cameras", (_req,res)=> res.json({ cameras }));
 
 app.post("/api/cameras", (req,res)=>{
@@ -160,7 +182,7 @@ app.post("/api/forget", (_req,res)=>{
   res.json({ ok:true });
 });
 
-
+// ====== DISCOVERY con progreso ======
 const discoverJobs = new Map(); // id -> { id, state, progress, steps, total, totalHosts, processedHosts, found, error }
 
 function newJob(){
@@ -189,7 +211,7 @@ app.post("/api/discover/start", async (req,res)=>{
   const { hosts = VRM_HOSTS } = req.body || {};
   const job = newJob();
 
-  
+  // heurística de progreso: 3 pasos por host
   job.total = Math.max(1, hosts.length * 3);
   job.totalHosts = hosts.length;
   job.processedHosts = 0;
@@ -198,24 +220,24 @@ app.post("/api/discover/start", async (req,res)=>{
     try{
       let found = [];
       for (const h of hosts){
-        
+        // 1) intento principal: RCPs del VRM
         const f1 = await discoverFromVRM(h, { user: VRM_USER, pass: VRM_PASS, secure: VRM_SECURE });
         found = found.concat(f1);
         update(job, 1);
 
-        
+        // 2) paso “extra” (placeholder)
         update(job, 1);
 
-        
+        // 3) deduplico parcial
         const byIp = new Map(found.map(o=>[o.ip, o]));
         found = Array.from(byIp.values());
 
-        
+        // marcar host procesado
         job.processedHosts += 1;
         update(job, 1, { found, processedHosts: job.processedHosts });
       }
 
-      
+      // merge con cámaras existentes y persistencia
       const map = new Map(cameras.map(c=>[c.ip, c]));
       for (const it of found){
         const prev = map.get(it.ip) || { ip: it.ip, name: null };
@@ -241,7 +263,7 @@ app.get("/api/discover/status", (req,res)=>{
   res.json({ ok:true, ...job, camerasCount: cameras.length });
 });
 
-
+// Compat: endpoint antiguo (sin progreso)
 app.post("/api/discover", async (req,res)=>{
   const { hosts = VRM_HOSTS } = req.body || {};
   let found = [];
@@ -260,7 +282,7 @@ app.post("/api/discover", async (req,res)=>{
   res.json({ ok:true, found: found.length, cameras });
 });
 
-
+// ====== STATUS/POLL ======
 app.get("/api/status", async (_req,res)=>{
   if (!polling) { pollOnce().catch(()=>{}); }
   res.json({ ts: Date.now(), items: lastStatus || [] });
@@ -275,8 +297,15 @@ app.post("/api/poll/once", async (_req,res)=>{
   res.json({ ok:true, items });
 });
 
+// ====== STATIC (⚠️ ahora desde /public) ======
+const PUBLIC_DIR = path.join(__dirname, "public");
+console.log("[static] dir =", PUBLIC_DIR);
+app.use(express.static(PUBLIC_DIR));
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, "index.html"));
+});
+// (si quisieras SPA fallback, descomentá esta línea):
+// app.get("*", (_req,res)=> res.sendFile(path.join(PUBLIC_DIR, "index.html")));
 
-app.use("/", express.static(__dirname));
-
-
-app.listen(PORT, ()=> console.log(`server up on http://localhost:${PORT}`));
+// ====== GO ======
+app.listen(PORT, ()=> console.log(`✅ server up on http://localhost:${PORT}`));
